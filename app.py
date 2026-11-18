@@ -1,4 +1,5 @@
 from collections import Counter
+import io
 import os
 import numpy as np
 import pandas as pd
@@ -53,45 +54,60 @@ st.markdown(
 )
 
 CSV_FILE = "vietlott_655.csv"
-DATA_URL = "https://raw.githubusercontent.com/vietvudanh/vietlott-data/main/data/power655.jsonl"
+
+# Danh sách các nguồn dữ liệu dự phòng tự động chuyển đổi
+DATA_SOURCES = [
+    "https://raw.githubusercontent.com/vietvudanh/vietlott-data/main/data/power655.jsonl",
+    "https://raw.githubusercontent.com/vietvudanh/vietlott-data/master/data/power655.jsonl",
+    "https://cdn.jsdelivr.net/gh/vietvudanh/vietlott-data@main/data/power655.jsonl",
+    "https://cdn.jsdelivr.net/gh/vietvudanh/vietlott-data@master/data/power655.jsonl",
+]
 
 
 def update_data():
-  try:
-    response = requests.get(DATA_URL, timeout=15)
-    response.raise_for_status()
-    df_raw = pd.read_json(response.text, lines=True)
-    records = []
-    for _, row in df_raw.iterrows():
-      nums = row["result"]
-      if isinstance(nums, list) and len(nums) >= 7:
-        records.append({
-            "Ky": int(row["id"]),
-            "Ngay": str(row["date"]),
-            "So1": int(nums[0]),
-            "So2": int(nums[1]),
-            "So3": int(nums[2]),
-            "So4": int(nums[3]),
-            "So5": int(nums[4]),
-            "So6": int(nums[5]),
-            "SoDacBiet": int(nums[6]),
-        })
-    df_clean = (
-        pd.DataFrame(records).sort_values(by="Ky").reset_index(drop=True)
-    )
-    df_clean.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
-    return True, len(df_clean)
-  except Exception as e:
-    return False, str(e)
+  headers = {"User-Agent": "Mozilla/5.0"}
+  last_error = ""
+
+  for url in DATA_SOURCES:
+    try:
+      response = requests.get(url, headers=headers, timeout=15)
+      if response.status_code == 200 and len(response.text.strip()) > 100:
+        df_raw = pd.read_json(io.StringIO(response.text), lines=True)
+        records = []
+        for _, row in df_raw.iterrows():
+          nums = row.get("result", [])
+          if isinstance(nums, list) and len(nums) >= 7:
+            records.append({
+                "Ky": int(row["id"]),
+                "Ngay": str(row["date"]),
+                "So1": int(nums[0]),
+                "So2": int(nums[1]),
+                "So3": int(nums[2]),
+                "So4": int(nums[3]),
+                "So5": int(nums[4]),
+                "So6": int(nums[5]),
+                "SoDacBiet": int(nums[6]),
+            })
+        if records:
+          df_clean = (
+              pd.DataFrame(records).sort_values(by="Ky").reset_index(drop=True)
+          )
+          df_clean.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
+          return True, len(df_clean)
+    except Exception as e:
+      last_error = str(e)
+      continue
+
+  return False, last_error or "Không kết nối được tới máy chủ dữ liệu."
 
 
 @st.cache_data
 def load_data():
   if not os.path.exists(CSV_FILE):
-    success, _ = update_data()
+    success, msg = update_data()
     if not success:
-      return None
-  return pd.read_csv(CSV_FILE)
+      return None, msg
+  return pd.read_csv(CSV_FILE), "OK"
 
 
 def is_valid_ticket(
@@ -188,9 +204,13 @@ def generate_tickets(
 
 
 st.title("🎱 Vietlott 6/55 Pro")
-df = load_data()
+df, status_msg = load_data()
+
 if df is None:
-  st.error("Không thể tải dữ liệu. Anh kiểm tra lại kết nối mạng nhé!")
+  st.error(f"Không thể tải dữ liệu tự động. Chi tiết: {status_msg}")
+  if st.button("🔄 Thử tải lại dữ liệu", type="primary"):
+    st.cache_data.clear()
+    st.rerun()
   st.stop()
 
 latest = df.iloc[-1]
@@ -208,10 +228,12 @@ with c1:
 with c2:
   if st.button("🔄 Cập nhật", use_container_width=True):
     with st.spinner("Đang tải..."):
-      ok, _ = update_data()
+      ok, info = update_data()
       if ok:
         st.cache_data.clear()
         st.rerun()
+      else:
+        st.error(f"Lỗi: {info}")
 
 tab_gen, tab_check, tab_stat = st.tabs(
     ["🎯 Tạo Số", "🔍 Dò Vé Lịch Sử", "📊 Thống Kê"]
