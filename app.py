@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
+import re
 import random
 from itertools import combinations
 
@@ -9,28 +11,53 @@ st.set_page_config(page_title="Vietlott 6/55 Pro", page_icon="🎯", layout="cen
 st.title("🎯 Vietlott 6/55 - Tối Ưu Tỷ Lệ Trúng")
 st.caption("Kết hợp thống kê dữ liệu thực tế, bộ lọc xác suất & ghép dàn thông minh")
 
-# Nguồn dữ liệu lịch sử thực tế
-DATA_URL = "https://raw.githubusercontent.com/vietlott-data/vietlott-data/main/data/power655.csv"
-
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def load_data():
-    try:
-        df = pd.read_csv(DATA_URL)
-        # Lấy 6 cột số chính
-        num_cols = [col for col in df.columns if 'num' in col.lower() or 'số' in col.lower()][:6]
-        if not num_cols:
-            num_cols = df.columns[2:8]
-        data = df[num_cols].dropna().astype(int).values.tolist()
-        return data
-    except Exception:
-        return []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # Nguồn 1: Kho dữ liệu mở Vietlott Power 6/55 (JSONL)
+    jsonl_urls = [
+        "https://raw.githubusercontent.com/vietlott-data/vietlott-data/main/data/power655.jsonl",
+        "https://raw.githubusercontent.com/vietlott-data/vietlott-data/master/data/power655.jsonl"
+    ]
+    for url in jsonl_urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                df = pd.read_json(res.text, lines=True)
+                if "result" in df.columns:
+                    # Lấy 6 số chính từ cột result
+                    data = [sorted([int(x) for x in r[:6]]) for r in df["result"].dropna() if len(r) >= 6]
+                    if len(data) > 50:
+                        return data, "Kho dữ liệu lịch sử toàn kỳ"
+        except Exception:
+            continue
 
-history = load_data()
+    # Nguồn 2: Cào trực tiếp các kỳ quay mới nhất từ kết quả xổ số web
+    try:
+        res = requests.get("https://xskt.com.vn/xs-power-655", headers=headers, timeout=8)
+        if res.status_code == 200:
+            # Tìm chuỗi 6 cặp số từ 01-55
+            blocks = re.findall(r'((?:\b(?:0[1-9]|[1-4][0-9]|5[0-5])\b[\s\-]+){5}\b(?:0[1-9]|[1-4][0-9]|5[0-5])\b)', res.text)
+            data = []
+            for b in blocks:
+                nums = sorted([int(x) for x in re.findall(r'\d{2}', b)])
+                if len(set(nums)) == 6:
+                    data.append(nums)
+            if len(data) >= 5:
+                return data[::-1], "Kết quả trực tiếp từ XSKT"
+    except Exception:
+        pass
+
+    return [], ""
+
+history, source_name = load_data()
 
 if history:
-    st.success(f"✅ Đã đồng bộ {len(history)} kỳ quay thực tế từ hệ thống.")
+    latest_str = " - ".join(f"{x:02d}" for x in history[-1])
+    st.success(f"✅ Đã đồng bộ **{len(history)}** kỳ thực tế ({source_name}).\n\nKỳ mới nhất ghi nhận: **{latest_str}**")
 else:
-    st.warning("⚠️ Đang dùng dữ liệu dự phòng do kết nối nguồn tạm gián đoạn.")
+    st.error("❌ Không thể kết nối máy chủ dữ liệu. Anh hãy bấm 'Manage app' -> 'Reboot app' để thử lại.")
 
 # Tính trọng số tần suất (kết hợp toàn bộ lịch sử & 30 kỳ gần nhất)
 def get_weights(hist_data):
@@ -42,20 +69,17 @@ def get_weights(hist_data):
         freq_all = all_nums.count(i) / (len(all_nums) + 1)
         freq_recent = recent_nums.count(i) / (len(recent_nums) + 1)
         # Cân bằng giữa số hay về và số lâu chưa về
-        weights[i] = (freq_all * 0.4) + (freq_recent * 0.4) + (0.2 / 55)
+        weights[i] = (freq_all * 0.45) + (freq_recent * 0.40) + (0.15 / 55)
     return weights
 
 # Bộ lọc loại bỏ các dãy số xác suất cực thấp
 def pass_smart_filter(combo):
     combo = sorted(combo)
-    # 1. Lọc chẵn/lẻ (chỉ giữ tỷ lệ 2-4, 3-3, 4-2)
     evens = sum(1 for x in combo if x % 2 == 0)
     if evens not in [2, 3, 4]:
         return False
-    # 2. Lọc tổng điểm (khoảng vàng 130 - 210 chiếm >75% kỳ quay)
     if not (130 <= sum(combo) <= 210):
         return False
-    # 3. Loại bỏ trường hợp có 3 số liên tiếp (vd: 12, 13, 14)
     consecutive = 0
     for i in range(len(combo) - 1):
         if combo[i+1] - combo[i] == 1:
@@ -64,13 +88,11 @@ def pass_smart_filter(combo):
                 return False
         else:
             consecutive = 0
-    # 4. Phân bổ đầu số (ít nhất trải trên 4 hàng chục khác nhau)
     decades = len(set(x // 10 for x in combo))
     if decades < 4:
         return False
     return True
 
-# Giao diện chọn chế độ
 mode = st.radio(
     "Chọn chiến thuật tạo số:",
     ["🎲 Lọc Thông Minh (Tối ưu từng vé lẻ)", "🕸️ Ghép Bao Dàn (Tăng tỷ lệ trúng giải phụ)"]
@@ -102,7 +124,6 @@ else:
     st.write("Hệ thống chọn ra **8 số sáng giá nhất** và ghép thành các bộ 6 số có độ phủ cao nhất.")
     if st.button("🕸️ Tạo Dàn Ghép 8 Số", use_container_width=True):
         weights = get_weights(history) if history else {i: 1 for i in range(1, 56)}
-        # Chọn 8 số có điểm cao kết hợp ngẫu nhiên có trọng số
         population = list(weights.keys())
         probs = np.array(list(weights.values()))
         probs = probs / probs.sum()
@@ -110,15 +131,6 @@ else:
         pool_8 = sorted(np.random.choice(population, size=8, replace=False, p=probs).tolist())
         st.success(f"🌟 Dàn 8 số hạt giống: **{' - '.join(f'{x:02d}' for x in pool_8)}**")
         
-        # Tạo tất cả tổ hợp 6 từ 8 số (28 bộ) và lọc lấy 6 bộ đẹp nhất
         all_combos = list(combinations(pool_8, 6))
         filtered_combos = [list(c) for c in all_combos if pass_smart_filter(c)]
         
-        if len(filtered_combos) < 4:
-            filtered_combos = [list(c) for c in all_combos]
-            
-        selected = random.sample(filtered_combos, min(6, len(filtered_combos)))
-        st.subheader("📋 6 Vé ghép tối ưu từ dàn trên:")
-        for idx, r in enumerate(selected, 1):
-            formatted = " - ".join([f"**{x:02d}**" for x in r])
-            st.info(f"Vé #{idx}:  {formatted}")
