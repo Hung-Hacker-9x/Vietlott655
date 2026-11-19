@@ -134,3 +134,11 @@ else:
         all_combos = list(combinations(pool_8, 6))
         filtered_combos = [list(c) for c in all_combos if pass_smart_filter(c)]
         
+        if len(filtered_combos) < 4:
+            filtered_combos = [list(c) for c in all_combos]
+            
+        selected = random.sample(filtered_combos, min(6, len(filtered_combos)))
+        st.subheader("📋 6 Vé ghép tối ưu từ dàn trên:")
+        for idx, r in enumerate(selected, 1):
+            formatted = " - ".join([f"**{x:02d}**" for x in r])
+            st.info(f"Vé #{idx}:  {formatted}")
