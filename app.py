@@ -3,13 +3,9 @@ import os
 import random
 import time
 from bs4 import BeautifulSoup
+from curl_cffi import requests as cffi_requests
 import pandas as pd
-import requests
 import streamlit as st
-import urllib3
-
-# Tắt cảnh báo chứng chỉ SSL khi gọi trực tiếp tới vietlott.vn
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="Vietlott 6/55 Auto-Data", page_icon="🎱")
 
@@ -24,7 +20,6 @@ def doc_du_lieu_luu_tru():
   if os.path.exists(FILE_DATA):
     try:
       df = pd.read_csv(FILE_DATA, dtype={"Ky": str})
-      # Chuyển cột Bo_so từ chuỗi "01-02-03-04-05-06" về list số nguyên [1, 2, 3, 4, 5, 6]
       df["Bo_so"] = df["Bo_so"].apply(
           lambda x: [int(i) for i in str(x).split("-")]
       )
@@ -45,19 +40,17 @@ def luu_du_lieu(df):
 
 def cap_nhat_tu_vietlott(df_cu, so_trang_khoi_tao=40):
   """
-    Tự động kết nối vietlott.vn:
-    - Nếu đã có data cũ: Chỉ tải các trang đầu cho đến khi gặp kỳ quay đã lưu -> Dừng ngay (siêu nhanh).
-    - Nếu chưa có data cũ: Quét sâu theo số trang khởi tạo để xây kho data ban đầu.
+    Dùng curl_cffi giả lập dấu vân tay TLS của Chrome thật để vượt tường lửa 403
+    và kết nối trực tiếp tới vietlott.vn.
     """
-  session = requests.Session()
+  session = cffi_requests.Session(impersonate="chrome120")
   headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      "Accept": (
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
       ),
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "vi-VN,vi;q=0.9",
-      "Referer": URL_VIETLOTT,
+      "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+      "Referer": "https://vietlott.vn/",
+      "Origin": "https://vietlott.vn",
   }
 
   cac_ky_da_co = set(df_cu["Ky"].astype(str)) if not df_cu.empty else set()
@@ -66,11 +59,11 @@ def cap_nhat_tu_vietlott(df_cu, so_trang_khoi_tao=40):
   du_lieu_moi = []
   da_cham_ky_cu = False
   thanh_tien_trinh = st.progress(
-      0, text="Đang kiểm tra kỳ quay mới trên vietlott.vn..."
+      0, text="Đang kết nối trình duyệt ảo tới vietlott.vn..."
   )
 
   try:
-    res = session.get(URL_VIETLOTT, headers=headers, timeout=15, verify=False)
+    res = session.get(URL_VIETLOTT, headers=headers, timeout=20)
     res.raise_for_status()
     soup = BeautifulSoup(res.text, "html.parser")
 
@@ -101,7 +94,6 @@ def cap_nhat_tu_vietlott(df_cu, so_trang_khoi_tao=40):
 
           if len(bong) >= 6:
             so_ky_trang_nay += 1
-            # Nếu kỳ này đã tồn tại trong kho data -> Báo hiệu dừng quét
             if ky in cac_ky_da_co:
               da_cham_ky_cu = True
               continue
@@ -116,7 +108,6 @@ def cap_nhat_tu_vietlott(df_cu, so_trang_khoi_tao=40):
       if so_ky_trang_nay == 0 or da_cham_ky_cu:
         break
 
-      # Chuyển sang trang tiếp theo trên web Vietlott
       viewstate = soup.find("input", {"id": "__VIEWSTATE"})
       eventvalidation = soup.find("input", {"id": "__EVENTVALIDATION"})
       viewstategen = soup.find("input", {"id": "__VIEWSTATEGENERATOR"})
@@ -134,15 +125,13 @@ def cap_nhat_tu_vietlott(df_cu, so_trang_khoi_tao=40):
           ),
       }
 
-      time.sleep(0.25)
-      res = session.post(
-          URL_VIETLOTT, data=payload, headers=headers, timeout=15, verify=False
-      )
+      time.sleep(0.3)
+      res = session.post(URL_VIETLOTT, data=payload, headers=headers, timeout=20)
+      res.raise_for_status()
       soup = BeautifulSoup(res.text, "html.parser")
 
     thanh_tien_trinh.empty()
 
-    # Ghép dữ liệu mới lên đầu dữ liệu cũ và lưu lại thành kho data chuẩn
     if du_lieu_moi:
       df_moi = pd.DataFrame(du_lieu_moi)
       df_tong = pd.concat([df_moi, df_cu], ignore_index=True)
@@ -162,17 +151,13 @@ def cap_nhat_tu_vietlott(df_cu, so_trang_khoi_tao=40):
 # --- GIAO DIỆN CHÍNH ---
 st.title("🎱 Hệ thống Tự Động Cập Nhật & Phân Tích Vietlott 6/55")
 
-# 1. Đọc kho dữ liệu hiện có
-df_kho = doc_du_lieu_luu_tru()
 
-# 2. Tự động đồng bộ kỳ mới từ vietlott.vn mỗi khi mở app (cache 30 phút để tránh spam)
 @st.cache_data(ttl=1800, show_spinner=False)
 def dong_bo_tu_dong():
   df_hien_tai = doc_du_lieu_luu_tru()
   return cap_nhat_tu_vietlott(df_hien_tai, so_trang_khoi_tao=40)
 
 
-# Cho phép ép cập nhật ngay lập tức bằng nút bấm
 col_btn1, col_btn2 = st.columns([2, 1])
 with col_btn1:
   if st.button("🔄 Đồng bộ kỳ quay mới ngay bây giờ", use_container_width=True):
@@ -182,7 +167,6 @@ df_data, so_ky_moi, loi_ket_noi = dong_bo_tu_dong()
 
 with col_btn2:
   if not df_data.empty:
-    # Cho phép tải file data CSV về máy bất cứ lúc nào
     csv_bytes = df_data.to_csv(index=False, encoding="utf-8-sig").encode(
         "utf-8-sig"
     )
@@ -194,7 +178,6 @@ with col_btn2:
         use_container_width=True,
     )
 
-# Thông báo trạng thái đồng bộ dữ liệu
 if loi_ket_noi:
   st.warning(
       f"⚠️ Không thể kết nối tới vietlott.vn lúc này ({loi_ket_noi}). Đang sử"
@@ -215,7 +198,6 @@ elif not df_data.empty:
 if not df_data.empty:
   st.divider()
 
-  # Tùy chọn phạm vi dữ liệu phân tích
   pham_vi = st.radio(
       "Chọn phạm vi dữ liệu để chạy thống kê:",
       options=[
@@ -236,7 +218,6 @@ if not df_data.empty:
   else:
     df_phan_tich = df_data
 
-  # Tính tần suất xuất hiện của 55 con số
   tat_ca_so = [so for bo in df_phan_tich["Bo_so"] for so in bo]
   tan_suat = Counter(tat_ca_so)
   for i in range(1, 56):
